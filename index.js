@@ -23,7 +23,7 @@ async function getSalesforceToken() {
 
     const resp = await axios.post(
       `${loginUrl}/services/oauth2/token`,
-      qs.stringify(params), // send as x-www-form-urlencoded
+      qs.stringify(params),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
 
@@ -165,6 +165,92 @@ app.post("/fetch-sos-file", async (req, res) => {
   } catch (err) {
     console.error("Error fetching SOS file:", err.message);
     res.status(500).json({ error: "Failed to fetch SOS file", details: err.message });
+  }
+});
+
+/**
+ * === PHASE 3: BULK SOS FILES ===
+ * Salesforce requests documents, Render fetches them, then posts back to Salesforce as Base64.
+ */
+app.post("/v1/sos/files", async (req, res) => {
+  try {
+    const { recordId, documents } = req.body;
+    console.log("Incoming file batch request:", { recordId, documents });
+
+    if (!recordId || !Array.isArray(documents)) {
+      return res.status(400).json({ error: "Missing recordId or documents array" });
+    }
+
+    // Get Salesforce OAuth token
+    const accessToken = await getSalesforceToken();
+
+    for (const fileUrl of documents) {
+      try {
+        console.log("Fetching document:", fileUrl);
+
+        let response = await axios.get(fileUrl, {
+          responseType: "arraybuffer",
+          maxRedirects: 5,
+          headers: {
+            "User-Agent": "Mozilla/5.0",
+            Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9"
+          }
+        });
+
+        if (response.headers["content-type"]?.includes("text/html")) {
+          console.warn("Got HTML instead of file, retrying with cookies…");
+          const urlObj = new URL(fileUrl);
+          const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
+          response = await fetchWithCookies(fileUrl, baseUrl);
+        }
+
+        const fileData = Buffer.from(response.data, "binary").toString("base64");
+        const fileName = fileUrl.split("/").pop() || "sos_document.pdf";
+
+        // Post file to Salesforce
+        const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+        console.log("Posting file to Salesforce callback:", fileName);
+
+        await axios.post(
+          callbackUrl,
+          {
+            requestId: recordId,
+            fileName,
+            contentType: response.headers["content-type"],
+            base64: fileData
+          },
+          {
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+
+        console.log(`Successfully posted file: ${fileName}`);
+      } catch (fileErr) {
+        console.error("Error fetching/posting file:", fileUrl, fileErr.message);
+        // Fallback: send URL only
+        const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+        await axios.post(
+          callbackUrl,
+          { requestId: recordId, fileName: fileUrl.split("/").pop(), url: fileUrl },
+          {
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+      }
+    }
+
+    res.status(202).json({ status: "FILES_PROCESSED", count: documents.length });
+
+  } catch (err) {
+    console.error("Error in /v1/sos/files:", err.message);
+    res.status(500).json({ error: "Failed to process files", details: err.message });
   }
 });
 
