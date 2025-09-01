@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 /**
- * === Helper: Get Salesforce OAuth Token ===
+ * === Salesforce OAuth Helper ===
  */
 async function getSalesforceToken() {
   try {
@@ -26,7 +26,6 @@ async function getSalesforceToken() {
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
 
-    console.log("Salesforce OAuth success");
     return resp.data.access_token;
   } catch (err) {
     console.error("Failed to get Salesforce token:", err.response?.data || err.message);
@@ -35,10 +34,10 @@ async function getSalesforceToken() {
 }
 
 /**
- * === Helper: Fetch with cookies when SOS returns HTML ===
+ * === Helper: Fetch SOS File with cookie fallback ===
  */
 async function fetchWithCookies(fileUrl, baseUrl) {
-  console.log("Fetching with cookies. Base URL:", baseUrl);
+  console.log("Retrying fetch with cookies. Base URL:", baseUrl);
 
   const initResp = await axios.get(baseUrl, {
     headers: {
@@ -50,10 +49,9 @@ async function fetchWithCookies(fileUrl, baseUrl) {
   const cookies = initResp.headers["set-cookie"] || [];
   console.log("Received cookies:", cookies);
 
-  const response = await axios.get(fileUrl, {
+  return await axios.get(fileUrl, {
     responseType: "arraybuffer",
     maxRedirects: 5,
-    timeout: 60000,
     headers: {
       "User-Agent": "Mozilla/5.0",
       Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
@@ -62,12 +60,10 @@ async function fetchWithCookies(fileUrl, baseUrl) {
       Cookie: cookies.join("; ")
     }
   });
-
-  return response;
 }
 
 /**
- * === PHASE 1 & 3: Start SOS Job + Fetch Documents ===
+ * === Phase 1: Start SOS Job ===
  */
 app.post("/v1/sos/jobs", async (req, res) => {
   try {
@@ -95,16 +91,19 @@ app.post("/v1/sos/jobs", async (req, res) => {
 
     console.log("Cobalt API status:", cobaltResp.status);
 
-    // Get Salesforce token
+    const cobaltData = cobaltResp.data;
     const accessToken = await getSalesforceToken();
 
-    // Step 1: Post business JSON to Salesforce
-    const businessCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
-    console.log("Posting business data to Salesforce callback:", businessCallbackUrl);
+    // === Step 1: Post raw business data JSON to Salesforce ===
+    const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+    console.log("Posting business data to Salesforce callback:", callbackUrl);
 
     await axios.post(
-      businessCallbackUrl,
-      { requestId: recordId, ...cobaltResp.data },
+      callbackUrl,
+      {
+        requestId: recordId,
+        ...cobaltData
+      },
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -115,32 +114,48 @@ app.post("/v1/sos/jobs", async (req, res) => {
 
     console.log("Successfully posted business data to Salesforce");
 
-    // Step 2: Handle documents
-    const results = cobaltResp.data?.results || [];
-    if (results.length > 0) {
-      for (const business of results) {
-        if (Array.isArray(business.documents) && business.documents.length > 0) {
-          console.log(`Found ${business.documents.length} documents for ${business.title}`);
+    // === Step 2: Process documents + profile URL ===
+    if (Array.isArray(cobaltData.results) && cobaltData.results.length > 0) {
+      for (const result of cobaltData.results) {
+        // Handle SOS business profile URL
+        if (result.url) {
+          try {
+            const htmlContent = `<html><body>
+              <p>Business Profile Page: 
+              <a href="${result.url}" target="_blank">${result.url}</a></p>
+            </body></html>`;
 
-          for (const doc of business.documents) {
-            const fileUrl = doc.url;
-            let fileName = doc.name || "SOS_Document";
+            await axios.post(
+              `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`,
+              {
+                requestId: recordId,
+                fileName: `SOS - ${companyName} - Business Profile.html`,
+                base64: Buffer.from(htmlContent).toString("base64"),
+                contentType: "text/html"
+              },
+              {
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  "Content-Type": "application/json"
+                }
+              }
+            );
 
-            // Ensure fileName has extension
-            if (!fileName.includes(".")) {
-              fileName += ".pdf";
-            }
+            console.log("Posted SOS profile URL as HTML attachment");
+          } catch (err) {
+            console.error("Error posting SOS profile URL:", err.message);
+          }
+        }
 
-            // Prefix with company
-            fileName = `SOS - ${business.title} - ${fileName}`;
-
+        // Handle documents
+        if (Array.isArray(result.documents)) {
+          for (const doc of result.documents) {
             try {
-              console.log("Fetching document:", fileUrl);
+              console.log("Fetching document:", doc.url);
 
-              let response = await axios.get(fileUrl, {
+              let response = await axios.get(doc.url, {
                 responseType: "arraybuffer",
                 maxRedirects: 5,
-                timeout: 60000,
                 headers: {
                   "User-Agent": "Mozilla/5.0",
                   Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
@@ -148,25 +163,27 @@ app.post("/v1/sos/jobs", async (req, res) => {
                 }
               });
 
-              if (response.headers["content-type"]?.includes("text/html")) {
-                console.warn("Got HTML instead of file, retrying with cookies…");
-                const urlObj = new URL(fileUrl);
+              // Retry on 401/403 with cookies
+              if (
+                response.status === 401 ||
+                response.status === 403 ||
+                response.headers["content-type"]?.includes("text/html")
+              ) {
+                console.warn("Retrying document fetch with cookies…");
+                const urlObj = new URL(doc.url);
                 const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
-                response = await fetchWithCookies(fileUrl, baseUrl);
+                response = await fetchWithCookies(doc.url, baseUrl);
               }
 
               const fileData = Buffer.from(response.data, "binary").toString("base64");
 
-              const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
-              console.log("Posting file to Salesforce callback:", fileName);
-
               await axios.post(
-                fileCallbackUrl,
+                `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`,
                 {
                   requestId: recordId,
-                  fileName,
+                  fileName: `SOS - ${companyName} - ${doc.name}`,
                   base64: fileData,
-                  contentType: response.headers["content-type"] || "application/pdf"
+                  contentType: response.headers["content-type"]
                 },
                 {
                   headers: {
@@ -176,77 +193,21 @@ app.post("/v1/sos/jobs", async (req, res) => {
                 }
               );
 
-              console.log(`Successfully posted file: ${fileName}`);
-            } catch (fileErr) {
-              console.error("Error fetching/posting file:", fileUrl, fileErr.message);
-
-              // fallback: post only URL
-              const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
-              await axios.post(
-                fileCallbackUrl,
-                { requestId: recordId, fileName, url: fileUrl },
-                {
-                  headers: {
-                    Authorization: `Bearer ${accessToken}`,
-                    "Content-Type": "application/json"
-                  }
-                }
-              );
+              console.log("Successfully posted file:", doc.name);
+            } catch (err) {
+              console.error("Error fetching/posting file:", doc.url, err.message);
             }
           }
         }
       }
     } else {
-      console.log("No documents found in Cobalt response.");
+      console.log("No results array in Cobalt response.");
     }
 
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
   } catch (err) {
     console.error("Error in /v1/sos/jobs:", err.message, err.response?.data || "");
     res.status(500).json({ error: "Failed to start SOS job", details: err.message });
-  }
-});
-
-/**
- * === PHASE 2: Fetch single SOS file (debug/test only) ===
- */
-app.post("/fetch-sos-file", async (req, res) => {
-  try {
-    const { fileUrl } = req.body;
-    console.log("Incoming file fetch request:", fileUrl);
-
-    if (!fileUrl) {
-      return res.status(400).json({ error: "Missing fileUrl" });
-    }
-
-    let response = await axios.get(fileUrl, {
-      responseType: "arraybuffer",
-      maxRedirects: 5,
-      timeout: 60000,
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
-      }
-    });
-
-    if (response.headers["content-type"]?.includes("text/html")) {
-      console.warn("Got HTML instead of file, retrying with cookies…");
-      const urlObj = new URL(fileUrl);
-      const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
-      response = await fetchWithCookies(fileUrl, baseUrl);
-    }
-
-    const fileData = Buffer.from(response.data, "binary").toString("base64");
-
-    res.json({
-      fileName: fileUrl.split("/").pop(),
-      contentType: response.headers["content-type"],
-      base64: fileData
-    });
-  } catch (err) {
-    console.error("Error fetching SOS file:", err.message);
-    res.status(500).json({ error: "Failed to fetch SOS file", details: err.message });
   }
 });
 
