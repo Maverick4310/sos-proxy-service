@@ -209,7 +209,7 @@ app.post("/v1/sos/files", async (req, res) => {
         const fileName = fileUrl.split("/").pop() || "sos_document.pdf";
 
         // Post file to Salesforce
-        const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+        const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
         console.log("Posting file to Salesforce callback:", fileName);
 
         await axios.post(
@@ -232,7 +232,7 @@ app.post("/v1/sos/files", async (req, res) => {
       } catch (fileErr) {
         console.error("Error fetching/posting file:", fileUrl, fileErr.message);
         // Fallback: send URL only
-        const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+        const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
         await axios.post(
           callbackUrl,
           { requestId: recordId, fileName: fileUrl.split("/").pop(), url: fileUrl },
