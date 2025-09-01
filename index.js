@@ -1,24 +1,23 @@
 const express = require("express");
 const axios = require("axios");
-const qs = require("qs"); // for form-encoded auth requests
+const qs = require("qs");
 const app = express();
 
 app.use(express.json());
 
 /**
  * === Helper: Get Salesforce OAuth Token ===
- * Uses username-password OAuth flow with Connected App credentials.
  */
 async function getSalesforceToken() {
   try {
-    const loginUrl = process.env.SF_LOGIN_URL || "https://test.salesforce.com"; // default sandbox
+    const loginUrl = process.env.SF_LOGIN_URL || "https://test.salesforce.com";
 
     const params = {
       grant_type: "password",
       client_id: process.env.SF_CLIENT_ID,
       client_secret: process.env.SF_CLIENT_SECRET,
       username: process.env.SF_USERNAME,
-      password: process.env.SF_PASSWORD // must be password + security token
+      password: process.env.SF_PASSWORD // password + security token
     };
 
     const resp = await axios.post(
@@ -36,7 +35,7 @@ async function getSalesforceToken() {
 }
 
 /**
- * === Helper: Fetch file with optional cookies ===
+ * === Helper: Fetch with cookies when SOS returns HTML ===
  */
 async function fetchWithCookies(fileUrl, baseUrl) {
   console.log("Fetching with cookies. Base URL:", baseUrl);
@@ -54,6 +53,7 @@ async function fetchWithCookies(fileUrl, baseUrl) {
   const response = await axios.get(fileUrl, {
     responseType: "arraybuffer",
     maxRedirects: 5,
+    timeout: 60000,
     headers: {
       "User-Agent": "Mozilla/5.0",
       Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
@@ -67,8 +67,7 @@ async function fetchWithCookies(fileUrl, baseUrl) {
 }
 
 /**
- * === PHASE 1 & 3: START SOS JOB + DOCUMENTS ===
- * Orchestrates business JSON + documents in one flow.
+ * === PHASE 1 & 3: Start SOS Job + Fetch Documents ===
  */
 app.post("/v1/sos/jobs", async (req, res) => {
   try {
@@ -89,14 +88,14 @@ app.post("/v1/sos/jobs", async (req, res) => {
     const cobaltResp = await axios.get(cobaltUrl, {
       headers: {
         "x-api-key": process.env.COBALT_API_KEY,
-        "Accept": "application/json"
+        Accept: "application/json"
       },
       timeout: 120000
     });
 
     console.log("Cobalt API status:", cobaltResp.status);
 
-    // Get Salesforce OAuth token
+    // Get Salesforce token
     const accessToken = await getSalesforceToken();
 
     // Step 1: Post business JSON to Salesforce
@@ -105,13 +104,10 @@ app.post("/v1/sos/jobs", async (req, res) => {
 
     await axios.post(
       businessCallbackUrl,
-      {
-        requestId: recordId,
-        ...cobaltResp.data
-      },
+      { requestId: recordId, ...cobaltResp.data },
       {
         headers: {
-          "Authorization": `Bearer ${accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json"
         }
       }
@@ -119,15 +115,24 @@ app.post("/v1/sos/jobs", async (req, res) => {
 
     console.log("Successfully posted business data to Salesforce");
 
-    // Step 2: Handle documents if present inside results[]
-    if (Array.isArray(cobaltResp.data.results)) {
-      for (const business of cobaltResp.data.results) {
+    // Step 2: Handle documents
+    const results = cobaltResp.data?.results || [];
+    if (results.length > 0) {
+      for (const business of results) {
         if (Array.isArray(business.documents) && business.documents.length > 0) {
           console.log(`Found ${business.documents.length} documents for ${business.title}`);
 
           for (const doc of business.documents) {
             const fileUrl = doc.url;
-            const fileName = `SOS - ${business.title} - ${doc.name || fileUrl.split("/").pop()}`;
+            let fileName = doc.name || "SOS_Document";
+
+            // Ensure fileName has extension
+            if (!fileName.includes(".")) {
+              fileName += ".pdf";
+            }
+
+            // Prefix with company
+            fileName = `SOS - ${business.title} - ${fileName}`;
 
             try {
               console.log("Fetching document:", fileUrl);
@@ -135,6 +140,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
               let response = await axios.get(fileUrl, {
                 responseType: "arraybuffer",
                 maxRedirects: 5,
+                timeout: 60000,
                 headers: {
                   "User-Agent": "Mozilla/5.0",
                   Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
@@ -159,12 +165,12 @@ app.post("/v1/sos/jobs", async (req, res) => {
                 {
                   requestId: recordId,
                   fileName,
-                  contentType: response.headers["content-type"],
-                  base64: fileData
+                  base64: fileData,
+                  contentType: response.headers["content-type"] || "application/pdf"
                 },
                 {
                   headers: {
-                    "Authorization": `Bearer ${accessToken}`,
+                    Authorization: `Bearer ${accessToken}`,
                     "Content-Type": "application/json"
                   }
                 }
@@ -174,18 +180,14 @@ app.post("/v1/sos/jobs", async (req, res) => {
             } catch (fileErr) {
               console.error("Error fetching/posting file:", fileUrl, fileErr.message);
 
-              // Fallback: send URL only
+              // fallback: post only URL
               const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
               await axios.post(
                 fileCallbackUrl,
-                {
-                  requestId: recordId,
-                  fileName,
-                  url: fileUrl
-                },
+                { requestId: recordId, fileName, url: fileUrl },
                 {
                   headers: {
-                    "Authorization": `Bearer ${accessToken}`,
+                    Authorization: `Bearer ${accessToken}`,
                     "Content-Type": "application/json"
                   }
                 }
@@ -195,11 +197,10 @@ app.post("/v1/sos/jobs", async (req, res) => {
         }
       }
     } else {
-      console.log("No results array in Cobalt response.");
+      console.log("No documents found in Cobalt response.");
     }
 
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
-
   } catch (err) {
     console.error("Error in /v1/sos/jobs:", err.message, err.response?.data || "");
     res.status(500).json({ error: "Failed to start SOS job", details: err.message });
@@ -207,7 +208,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
 });
 
 /**
- * === PHASE 2: FETCH SOS FILE (test/debug only) ===
+ * === PHASE 2: Fetch single SOS file (debug/test only) ===
  */
 app.post("/fetch-sos-file", async (req, res) => {
   try {
@@ -221,6 +222,7 @@ app.post("/fetch-sos-file", async (req, res) => {
     let response = await axios.get(fileUrl, {
       responseType: "arraybuffer",
       maxRedirects: 5,
+      timeout: 60000,
       headers: {
         "User-Agent": "Mozilla/5.0",
         Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
