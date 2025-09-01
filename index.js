@@ -1,13 +1,44 @@
 const express = require("express");
 const axios = require("axios");
+const qs = require("qs"); // for form-encoded auth requests
 const app = express();
 
 app.use(express.json());
 
 /**
+ * === Helper: Get Salesforce OAuth Token ===
+ * Uses username-password OAuth flow with Connected App credentials.
+ */
+async function getSalesforceToken() {
+  try {
+    const loginUrl = process.env.SF_LOGIN_URL || "https://test.salesforce.com"; // default sandbox
+
+    const params = {
+      grant_type: "password",
+      client_id: process.env.SF_CLIENT_ID,
+      client_secret: process.env.SF_CLIENT_SECRET,
+      username: process.env.SF_USERNAME,
+      password: process.env.SF_PASSWORD // must be password + security token
+    };
+
+    const resp = await axios.post(
+      `${loginUrl}/services/oauth2/token`,
+      qs.stringify(params), // send as x-www-form-urlencoded
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+
+    console.log("Salesforce OAuth success");
+    return resp.data.access_token;
+  } catch (err) {
+    console.error("Failed to get Salesforce token:", err.response?.data || err.message);
+    throw err;
+  }
+}
+
+/**
  * === PHASE 1: START SOS JOB ===
- * Salesforce will call this with { companyName, recordId, state }.
- * Render will call Cobalt API, then forward raw JSON to Salesforce callback.
+ * Salesforce calls this with { companyName, recordId, state }.
+ * Render calls Cobalt API, then posts raw JSON into Salesforce using OAuth.
  */
 app.post("/v1/sos/jobs", async (req, res) => {
   try {
@@ -15,19 +46,17 @@ app.post("/v1/sos/jobs", async (req, res) => {
     console.log("Incoming request:", { companyName, recordId, state });
 
     if (!companyName || !recordId || !state) {
-      console.error("Missing required fields in request");
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Build Cobalt API request
-    const endpoint = `${process.env.COBALT_API_ENDPOINT}?searchQuery=${encodeURIComponent(
+    // Call Cobalt API
+    const cobaltUrl = `${process.env.COBALT_API_ENDPOINT}?searchQuery=${encodeURIComponent(
       companyName
     )}&state=${encodeURIComponent(state)}&liveData=true`;
 
-    console.log("Using COBALT_API_ENDPOINT:", process.env.COBALT_API_ENDPOINT);
-    console.log("Calling Cobalt API:", endpoint);
+    console.log("Calling Cobalt API:", cobaltUrl);
 
-    const cobaltResp = await axios.get(endpoint, {
+    const cobaltResp = await axios.get(cobaltUrl, {
       headers: {
         "x-api-key": process.env.COBALT_API_KEY,
         "Accept": "application/json"
@@ -35,30 +64,34 @@ app.post("/v1/sos/jobs", async (req, res) => {
       timeout: 120000
     });
 
-    console.log("Cobalt response status:", cobaltResp.status);
+    console.log("Cobalt API status:", cobaltResp.status);
 
-    // Forward raw JSON to Salesforce callback
-    const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+    // Get Salesforce OAuth token
+    const accessToken = await getSalesforceToken();
+
+    // Post results to Salesforce
+    const callbackUrl = `${process.env.SF_INSTANCE_URL}/services/apexrest/sos/callback`;
     console.log("Posting results to Salesforce callback:", callbackUrl);
 
     await axios.post(
       callbackUrl,
       {
-        requestId: recordId, // tells SF which CreditApp this belongs to
+        requestId: recordId,
         ...cobaltResp.data
       },
       {
-        headers: { "Content-Type": "application/json" }
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        }
       }
     );
 
     console.log("Successfully posted results to Salesforce");
-
-    // Respond immediately to Salesforce
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
 
   } catch (err) {
-    console.error("Error in /v1/sos/jobs:", err.message, err.stack);
+    console.error("Error in /v1/sos/jobs:", err.message, err.response?.data || "");
     res.status(500).json({ error: "Failed to start SOS job", details: err.message });
   }
 });
@@ -70,11 +103,10 @@ app.post("/v1/sos/jobs", async (req, res) => {
  */
 async function fetchWithCookies(fileUrl, baseUrl) {
   console.log("Fetching with cookies. Base URL:", baseUrl);
-  // Step 1: Get a session cookie
+
   const initResp = await axios.get(baseUrl, {
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "User-Agent": "Mozilla/5.0",
       Accept: "text/html,application/xhtml+xml"
     }
   });
@@ -82,13 +114,11 @@ async function fetchWithCookies(fileUrl, baseUrl) {
   const cookies = initResp.headers["set-cookie"] || [];
   console.log("Received cookies:", cookies);
 
-  // Step 2: Retry file request with cookies
   const response = await axios.get(fileUrl, {
     responseType: "arraybuffer",
     maxRedirects: 5,
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "User-Agent": "Mozilla/5.0",
       Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
       Referer: baseUrl,
@@ -105,34 +135,26 @@ app.post("/fetch-sos-file", async (req, res) => {
     console.log("Incoming file fetch request:", fileUrl);
 
     if (!fileUrl) {
-      console.error("Missing fileUrl in request");
       return res.status(400).json({ error: "Missing fileUrl" });
     }
 
-    // Default request
     let response = await axios.get(fileUrl, {
       responseType: "arraybuffer",
       maxRedirects: 5,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9"
       }
     });
 
-    console.log("Initial fetch content-type:", response.headers["content-type"]);
-
-    // If response looks like HTML, retry with cookie handling
     if (response.headers["content-type"]?.includes("text/html")) {
       console.warn("Got HTML instead of file, retrying with cookies…");
       const urlObj = new URL(fileUrl);
       const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
-
       response = await fetchWithCookies(fileUrl, baseUrl);
     }
 
-    // Convert file into Base64
     const fileData = Buffer.from(response.data, "binary").toString("base64");
 
     res.json({
@@ -141,7 +163,7 @@ app.post("/fetch-sos-file", async (req, res) => {
       base64: fileData
     });
   } catch (err) {
-    console.error("Error fetching SOS file:", err.message, err.stack);
+    console.error("Error fetching SOS file:", err.message);
     res.status(500).json({ error: "Failed to fetch SOS file", details: err.message });
   }
 });
