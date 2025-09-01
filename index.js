@@ -70,7 +70,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
     const accessToken = await getSalesforceToken();
 
     // Post results to Salesforce
-    const callbackUrl = `${process.env.SF_INSTANCE_URL}/services/apexrest/creditapp/sos/callback`;
+    const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
     console.log("Posting results to Salesforce callback:", callbackUrl);
 
     await axios.post(
