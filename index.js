@@ -12,7 +12,10 @@ app.use(express.json());
 app.post("/v1/sos/jobs", async (req, res) => {
   try {
     const { companyName, recordId, state } = req.body;
+    console.log("Incoming request:", { companyName, recordId, state });
+
     if (!companyName || !recordId || !state) {
+      console.error("Missing required fields in request");
       return res.status(400).json({ error: "Missing required fields" });
     }
 
@@ -20,6 +23,9 @@ app.post("/v1/sos/jobs", async (req, res) => {
     const endpoint = `${process.env.COBALT_API_ENDPOINT}?searchQuery=${encodeURIComponent(
       companyName
     )}&state=${encodeURIComponent(state)}&liveData=true`;
+
+    console.log("Using COBALT_API_ENDPOINT:", process.env.COBALT_API_ENDPOINT);
+    console.log("Calling Cobalt API:", endpoint);
 
     const cobaltResp = await axios.get(endpoint, {
       headers: {
@@ -29,8 +35,11 @@ app.post("/v1/sos/jobs", async (req, res) => {
       timeout: 120000
     });
 
+    console.log("Cobalt response status:", cobaltResp.status);
+
     // Forward raw JSON to Salesforce callback
     const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+    console.log("Posting results to Salesforce callback:", callbackUrl);
 
     await axios.post(
       callbackUrl,
@@ -43,10 +52,14 @@ app.post("/v1/sos/jobs", async (req, res) => {
       }
     );
 
-    // Respond immediately to Salesforce (don’t block on mapping)
+    console.log("Successfully posted results to Salesforce");
+
+    // Respond immediately to Salesforce
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
+
   } catch (err) {
-    res.status(500).json({ error: "Failed to start SOS job" });
+    console.error("Error in /v1/sos/jobs:", err.message, err.stack);
+    res.status(500).json({ error: "Failed to start SOS job", details: err.message });
   }
 });
 
@@ -56,6 +69,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
  * retrying with cookies if necessary, then returns Base64.
  */
 async function fetchWithCookies(fileUrl, baseUrl) {
+  console.log("Fetching with cookies. Base URL:", baseUrl);
   // Step 1: Get a session cookie
   const initResp = await axios.get(baseUrl, {
     headers: {
@@ -66,6 +80,7 @@ async function fetchWithCookies(fileUrl, baseUrl) {
   });
 
   const cookies = initResp.headers["set-cookie"] || [];
+  console.log("Received cookies:", cookies);
 
   // Step 2: Retry file request with cookies
   const response = await axios.get(fileUrl, {
@@ -87,7 +102,10 @@ async function fetchWithCookies(fileUrl, baseUrl) {
 app.post("/fetch-sos-file", async (req, res) => {
   try {
     const { fileUrl } = req.body;
+    console.log("Incoming file fetch request:", fileUrl);
+
     if (!fileUrl) {
+      console.error("Missing fileUrl in request");
       return res.status(400).json({ error: "Missing fileUrl" });
     }
 
@@ -103,9 +121,11 @@ app.post("/fetch-sos-file", async (req, res) => {
       }
     });
 
+    console.log("Initial fetch content-type:", response.headers["content-type"]);
+
     // If response looks like HTML, retry with cookie handling
     if (response.headers["content-type"]?.includes("text/html")) {
-      // derive base URL from fileUrl (scheme + host)
+      console.warn("Got HTML instead of file, retrying with cookies…");
       const urlObj = new URL(fileUrl);
       const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
 
@@ -121,7 +141,8 @@ app.post("/fetch-sos-file", async (req, res) => {
       base64: fileData
     });
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch SOS file" });
+    console.error("Error fetching SOS file:", err.message, err.stack);
+    res.status(500).json({ error: "Failed to fetch SOS file", details: err.message });
   }
 });
 
