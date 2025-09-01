@@ -119,73 +119,79 @@ app.post("/v1/sos/jobs", async (req, res) => {
 
     console.log("Successfully posted business data to Salesforce");
 
-    // Step 2: Handle documents if present
-    if (Array.isArray(cobaltResp.data.documents) && cobaltResp.data.documents.length > 0) {
-      console.log("Found documents, starting file upload flow...");
+    // Step 2: Handle documents if present inside results[]
+    if (Array.isArray(cobaltResp.data.results)) {
+      for (const business of cobaltResp.data.results) {
+        if (Array.isArray(business.documents) && business.documents.length > 0) {
+          console.log(`Found ${business.documents.length} documents for ${business.title}`);
 
-      for (const fileUrl of cobaltResp.data.documents) {
-        try {
-          console.log("Fetching document:", fileUrl);
+          for (const doc of business.documents) {
+            const fileUrl = doc.url;
+            const fileName = doc.name || fileUrl.split("/").pop();
 
-          let response = await axios.get(fileUrl, {
-            responseType: "arraybuffer",
-            maxRedirects: 5,
-            headers: {
-              "User-Agent": "Mozilla/5.0",
-              Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
-              "Accept-Language": "en-US,en;q=0.9"
+            try {
+              console.log("Fetching document:", fileUrl);
+
+              let response = await axios.get(fileUrl, {
+                responseType: "arraybuffer",
+                maxRedirects: 5,
+                headers: {
+                  "User-Agent": "Mozilla/5.0",
+                  Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
+                  "Accept-Language": "en-US,en;q=0.9"
+                }
+              });
+
+              if (response.headers["content-type"]?.includes("text/html")) {
+                console.warn("Got HTML instead of file, retrying with cookies…");
+                const urlObj = new URL(fileUrl);
+                const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
+                response = await fetchWithCookies(fileUrl, baseUrl);
+              }
+
+              const fileData = Buffer.from(response.data, "binary").toString("base64");
+
+              const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
+              console.log("Posting file to Salesforce callback:", fileName);
+
+              await axios.post(
+                fileCallbackUrl,
+                {
+                  requestId: recordId,
+                  fileName,
+                  contentType: response.headers["content-type"],
+                  base64: fileData
+                },
+                {
+                  headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                  }
+                }
+              );
+
+              console.log(`Successfully posted file: ${fileName}`);
+            } catch (fileErr) {
+              console.error("Error fetching/posting file:", fileUrl, fileErr.message);
+
+              // Fallback: send URL only
+              const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
+              await axios.post(
+                fileCallbackUrl,
+                { requestId: recordId, fileName, url: fileUrl },
+                {
+                  headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                  }
+                }
+              );
             }
-          });
-
-          if (response.headers["content-type"]?.includes("text/html")) {
-            console.warn("Got HTML instead of file, retrying with cookies…");
-            const urlObj = new URL(fileUrl);
-            const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
-            response = await fetchWithCookies(fileUrl, baseUrl);
           }
-
-          const fileData = Buffer.from(response.data, "binary").toString("base64");
-          const fileName = fileUrl.split("/").pop() || "sos_document.pdf";
-
-          const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
-          console.log("Posting file to Salesforce callback:", fileName);
-
-          await axios.post(
-            fileCallbackUrl,
-            {
-              requestId: recordId,
-              fileName,
-              contentType: response.headers["content-type"],
-              base64: fileData
-            },
-            {
-              headers: {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json"
-              }
-            }
-          );
-
-          console.log(`Successfully posted file: ${fileName}`);
-        } catch (fileErr) {
-          console.error("Error fetching/posting file:", fileUrl, fileErr.message);
-
-          // Fallback: send URL only
-          const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
-          await axios.post(
-            fileCallbackUrl,
-            { requestId: recordId, fileName: fileUrl.split("/").pop(), url: fileUrl },
-            {
-              headers: {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json"
-              }
-            }
-          );
         }
       }
     } else {
-      console.log("No documents found in Cobalt response.");
+      console.log("No results array in Cobalt response.");
     }
 
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
