@@ -31,7 +31,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
     });
 
     // Forward raw JSON to Salesforce callback
-    const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/sos/callback`;
+    const callbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
     console.log("Posting results to Salesforce callback:", callbackUrl);
 
     await axios.post(
