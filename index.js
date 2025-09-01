@@ -127,7 +127,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
 
           for (const doc of business.documents) {
             const fileUrl = doc.url;
-            const fileName = doc.name || fileUrl.split("/").pop();
+            const fileName = `SOS - ${business.title} - ${doc.name || fileUrl.split("/").pop()}`;
 
             try {
               console.log("Fetching document:", fileUrl);
@@ -178,7 +178,11 @@ app.post("/v1/sos/jobs", async (req, res) => {
               const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
               await axios.post(
                 fileCallbackUrl,
-                { requestId: recordId, fileName, url: fileUrl },
+                {
+                  requestId: recordId,
+                  fileName,
+                  url: fileUrl
+                },
                 {
                   headers: {
                     "Authorization": `Bearer ${accessToken}`,
