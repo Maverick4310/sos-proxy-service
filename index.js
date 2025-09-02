@@ -15,7 +15,7 @@ async function getSalesforceToken() {
     client_id: process.env.SF_CLIENT_ID,
     client_secret: process.env.SF_CLIENT_SECRET,
     username: process.env.SF_USERNAME,
-    password: process.env.SF_PASSWORD // password + token
+    password: process.env.SF_PASSWORD // password + security token
   };
   const resp = await axios.post(
     `${loginUrl}/services/oauth2/token`,
@@ -139,29 +139,23 @@ app.post("/v1/sos/jobs", async (req, res) => {
     // === Step 2: Process each result ===
     if (Array.isArray(data.results) && data.results.length > 0) {
       for (const result of data.results) {
-        // --- 2a: Business profile URL ---
+        // --- 2a: Business profile URL (send as Note) ---
         if (result.url) {
           try {
-            const htmlContent = `<html><body>
-              <p>Business Profile Page:
-              <a href="${result.url}" target="_blank">${result.url}</a></p>
-            </body></html>`;
-
             const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
             await postToSalesforce(
               fileCallbackUrl,
               {
                 requestId: recordId,
-                fileName: `SOS - ${companyName} - Business Profile.html`,
-                base64: Buffer.from(htmlContent).toString("base64"),
-                contentType: "text/html"
+                fileName: `SOS - ${companyName} - Business Profile Link`,
+                url: result.url // Apex will insert as Note
               },
               accessToken
             );
 
-            console.log("Posted business profile URL as HTML attachment");
+            console.log("Posted business profile URL as Note");
           } catch (err) {
-            console.error("Error posting business profile HTML:", err.message);
+            console.error("Error posting business profile URL:", err.message);
           }
         }
 
