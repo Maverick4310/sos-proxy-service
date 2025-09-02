@@ -139,7 +139,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
     // === Step 2: Process each result ===
     if (Array.isArray(data.results) && data.results.length > 0) {
       for (const result of data.results) {
-        // --- 2a: Business profile URL (send as Note) ---
+        // --- 2a: Business profile URL (always Note) ---
         if (result.url) {
           try {
             const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
@@ -147,8 +147,8 @@ app.post("/v1/sos/jobs", async (req, res) => {
               fileCallbackUrl,
               {
                 requestId: recordId,
-                fileName: `SOS - ${companyName} - Business Profile Link`,
-                url: result.url // Apex will insert as Note
+                fileName: companyName, // Apex will use this to build "SOS - Company - URL"
+                url: result.url
               },
               accessToken
             );
