@@ -78,35 +78,6 @@ async function fetchWithRetry(companyName, state, attempt = 1, maxAttempts = 3, 
 }
 
 /**
- * === Helper: Fetch with cookies if blocked ===
- */
-async function fetchWithCookies(fileUrl) {
-  const urlObj = new URL(fileUrl);
-  const baseUrl = `${urlObj.protocol}//${urlObj.host}/`;
-
-  console.log("Priming session at:", baseUrl);
-
-  const initResp = await axios.get(baseUrl, {
-    headers: { "User-Agent": "Mozilla/5.0", Accept: "text/html" }
-  });
-
-  const cookies = initResp.headers["set-cookie"] || [];
-
-  return axios.get(fileUrl, {
-    responseType: "arraybuffer",
-    maxRedirects: 5,
-    timeout: 60000,
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      Referer: baseUrl,
-      Cookie: cookies.join("; ")
-    }
-  });
-}
-
-/**
  * === Phase 1: Start SOS Job ===
  */
 app.post("/v1/sos/jobs", async (req, res) => {
@@ -124,7 +95,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
     // Get Salesforce token
     const accessToken = await getSalesforceToken();
 
-    // === Step 1: Post raw business JSON to Salesforce ===
+    // === Step: Post raw business JSON to Salesforce ===
     const businessCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
     console.log("Posting business data to Salesforce callback:", businessCallbackUrl);
 
@@ -136,139 +107,10 @@ app.post("/v1/sos/jobs", async (req, res) => {
 
     console.log("Posted business data to Salesforce");
 
-    // === Step 2: Process each result ===
-    if (Array.isArray(data.results) && data.results.length > 0) {
-      for (const result of data.results) {
-        // --- 2a: Business profile URL (always Note) ---
-        if (result.url) {
-          try {
-            const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
-            await postToSalesforce(
-              fileCallbackUrl,
-              {
-                requestId: recordId,
-                fileName: companyName, // Apex will use this to build "SOS - Company - URL"
-                url: result.url
-              },
-              accessToken
-            );
-
-            console.log("Posted business profile URL as Note");
-          } catch (err) {
-            console.error("Error posting business profile URL:", err.message);
-          }
-        }
-
-        // --- 2b: Documents loop ---
-        if (Array.isArray(result.documents)) {
-          for (const doc of result.documents) {
-            let fileName = doc.name || "SOS_Document";
-            if (!fileName.includes(".")) fileName += ".pdf"; // enforce extension
-            fileName = `SOS - ${companyName} - ${fileName}`;
-
-            try {
-              console.log("Fetching document:", doc.url);
-
-              let response;
-              try {
-                response = await axios.get(doc.url, {
-                  responseType: "arraybuffer",
-                  timeout: 60000,
-                  headers: {
-                    "User-Agent": "Mozilla/5.0",
-                    Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9"
-                  }
-                });
-              } catch (err) {
-                if (err.response?.status === 403 || err.response?.status === 401) {
-                  console.warn("403/401 blocked. Retrying with cookies...");
-                  response = await fetchWithCookies(doc.url);
-                } else {
-                  throw err;
-                }
-              }
-
-              if (response.headers["content-type"]?.includes("text/html")) {
-                console.warn("Got HTML after retry, skipping file fetch.");
-                throw new Error("Unfetchable file, HTML returned");
-              }
-
-              const fileData = Buffer.from(response.data, "binary").toString("base64");
-              const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
-
-              await postToSalesforce(
-                fileCallbackUrl,
-                {
-                  requestId: recordId,
-                  fileName,
-                  base64: fileData,
-                  contentType: response.headers["content-type"] || "application/pdf"
-                },
-                accessToken
-              );
-
-              console.log("Posted file:", fileName);
-            } catch (fileErr) {
-              console.error("File fetch failed:", doc.url, fileErr.message);
-
-              // fallback: post only URL
-              const fileCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/files/callback`;
-              await postToSalesforce(
-                fileCallbackUrl,
-                { requestId: recordId, fileName, url: doc.url },
-                accessToken
-              );
-            }
-          }
-        }
-      }
-    } else {
-      console.log("No results array in Cobalt response.");
-    }
-
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
   } catch (err) {
     console.error("Error in /v1/sos/jobs:", err.message, err.response?.data || "");
     res.status(500).json({ error: "Failed to start SOS job", details: err.message });
-  }
-});
-
-/**
- * === Phase 3: Debug endpoint to fetch one file manually ===
- */
-app.post("/fetch-sos-file", async (req, res) => {
-  try {
-    const { fileUrl } = req.body;
-    console.log("Incoming debug fetch:", fileUrl);
-
-    if (!fileUrl) return res.status(400).json({ error: "Missing fileUrl" });
-
-    let response = await axios.get(fileUrl, {
-      responseType: "arraybuffer",
-      timeout: 60000,
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Accept: "application/pdf,image/*;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
-      }
-    });
-
-    if (response.headers["content-type"]?.includes("text/html")) {
-      console.warn("Got HTML in debug fetch, retrying with cookies...");
-      response = await fetchWithCookies(fileUrl);
-    }
-
-    const fileData = Buffer.from(response.data, "binary").toString("base64");
-
-    res.json({
-      fileName: fileUrl.split("/").pop(),
-      contentType: response.headers["content-type"],
-      base64: fileData
-    });
-  } catch (err) {
-    console.error("Debug fetch failed:", err.message);
-    res.status(500).json({ error: "Debug fetch failed", details: err.message });
   }
 });
 
