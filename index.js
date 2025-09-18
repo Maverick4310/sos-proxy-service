@@ -43,11 +43,11 @@ async function postToSalesforce(endpoint, payload, accessToken) {
 async function fetchWithRetry(companyName, state, attempt = 1, maxAttempts = 3, retryId = null) {
   let cobaltUrl;
   if (retryId) {
-    cobaltUrl = `${process.env.COBALT_API_ENDPOINT}?retryId=${retryId}`;
+    cobaltUrl = `${process.env.COBALT_API_ENDPOINT}?retryId=${retryId}&screenshot=true`;
   } else {
     cobaltUrl = `${process.env.COBALT_API_ENDPOINT}?searchQuery=${encodeURIComponent(
       companyName
-    )}&state=${encodeURIComponent(state)}&liveData=true`;
+    )}&state=${encodeURIComponent(state)}&liveData=true&screenshot=true`;
   }
 
   console.log(`[Attempt ${attempt}] Calling Cobalt API: ${cobaltUrl}`);
@@ -89,7 +89,7 @@ app.post("/v1/sos/jobs", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Call Cobalt API with retry logic
+    // Call Cobalt API with retry logic (includes screenshot=true)
     const data = await fetchWithRetry(companyName, state);
 
     // Get Salesforce token
