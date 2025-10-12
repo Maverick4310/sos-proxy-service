@@ -82,15 +82,15 @@ async function fetchWithRetry(companyName, state, attempt = 1, maxAttempts = 3, 
  */
 app.post("/v1/sos/jobs", async (req, res) => {
   try {
-    const { companyName, recordId, state } = req.body;
-    console.log("Incoming request:", { companyName, recordId, state });
+    const { companyName, recordId, state, context } = req.body;
+    console.log("Incoming request:", { companyName, recordId, state, context });
 
     if (!companyName || !recordId || !state) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Default context if not provided
-const ctx = context || "CreditApp";
+    // Default to CreditApp if context not provided
+    const ctx = context || "CreditApp";
 
     // Call Cobalt API with retry logic (includes screenshot=true)
     const data = await fetchWithRetry(companyName, state);
@@ -99,16 +99,16 @@ const ctx = context || "CreditApp";
     const accessToken = await getSalesforceToken();
 
     // === Step: Post raw business JSON to Salesforce ===
-    const businessCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
+    const businessCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/sos/callback`;
     console.log("Posting business data to Salesforce callback:", businessCallbackUrl);
 
-await postToSalesforce(
-  businessCallbackUrl,
-  { requestId: recordId, context: ctx, ...data },
-  accessToken
-);
-    console.log("Posted business data to Salesforce");
+    await postToSalesforce(
+      businessCallbackUrl,
+      { requestId: recordId, context: ctx, ...data },
+      accessToken
+    );
 
+    console.log("Posted business data to Salesforce");
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
   } catch (err) {
     console.error("Error in /v1/sos/jobs:", err.message, err.response?.data || "");
