@@ -89,6 +89,9 @@ app.post("/v1/sos/jobs", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
+    // Default context if not provided
+const ctx = context || "CreditApp";
+
     // Call Cobalt API with retry logic (includes screenshot=true)
     const data = await fetchWithRetry(companyName, state);
 
@@ -99,12 +102,11 @@ app.post("/v1/sos/jobs", async (req, res) => {
     const businessCallbackUrl = `${process.env.SF_CALLBACK_BASE}/services/apexrest/creditapp/sos/callback`;
     console.log("Posting business data to Salesforce callback:", businessCallbackUrl);
 
-    await postToSalesforce(
-      businessCallbackUrl,
-      { requestId: recordId, ...data },
-      accessToken
-    );
-
+await postToSalesforce(
+  businessCallbackUrl,
+  { requestId: recordId, context: ctx, ...data },
+  accessToken
+);
     console.log("Posted business data to Salesforce");
 
     res.status(202).json({ jobId: Date.now(), status: "QUEUED" });
