@@ -10,6 +10,29 @@ app.use(express.json());
  */
 async function getSalesforceToken() {
   const loginUrl = process.env.SF_LOGIN_URL || "https://test.salesforce.com";
+
+  // 2026-10 (Render Client Credentials) Salesforce is retiring the OAuth username-password flow.
+  // Sign in with client credentials (External Client App "Render Integration", runs as the same
+  // integration user) and fall back to the password flow if that is refused, logging why.
+  if (process.env.SF_CC_CLIENT_ID && process.env.SF_CC_CLIENT_SECRET) {
+    try {
+      const cc = await axios.post(
+        `${loginUrl}/services/oauth2/token`,
+        qs.stringify({
+          grant_type: "client_credentials",
+          client_id: process.env.SF_CC_CLIENT_ID,
+          client_secret: process.env.SF_CC_CLIENT_SECRET
+        }),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+      );
+      console.log("Salesforce auth: client credentials");
+      return cc.data.access_token;
+    } catch (err) {
+      const detail = err.response ? `HTTP ${err.response.status} ${JSON.stringify(err.response.data).slice(0, 200)}` : err.message;
+      console.warn(`Salesforce client credentials refused (${detail}). Using password flow.`);
+    }
+  }
+
   const params = {
     grant_type: "password",
     client_id: process.env.SF_CLIENT_ID,
